@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 from config import ADMIN_IDS
 from database import get_all_orders, get_order, update_order_status, get_stats, get_all_users
@@ -18,6 +19,17 @@ admin_router = Router()
 
 class AdminStates(StatesGroup):
     broadcast_message = State()
+
+
+async def safe_edit(message, text, **kwargs):
+    """edit_text — agar xabar o'zgarmagan bo'lsa xato chiqarmaslik."""
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            pass
+        else:
+            raise
 
 
 def is_admin(uid): return uid in ADMIN_IDS
@@ -34,7 +46,7 @@ async def cmd_admin(message: Message):
 @admin_router.callback_query(F.data == "admin:menu")
 async def cb_admin_menu(call: CallbackQuery):
     if not is_admin(call.from_user.id): return
-    await call.message.edit_text(t("admin_menu", "en"), reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+    await safe_edit(call.message, t("admin_menu", "en"), reply_markup=admin_menu_keyboard(), parse_mode="HTML")
 
 
 # ── Rates ──────────────────────────────────────────────────────────────────────
@@ -42,23 +54,25 @@ async def cb_admin_menu(call: CallbackQuery):
 @admin_router.callback_query(F.data == "admin:rates")
 async def cb_admin_rates(call: CallbackQuery):
     if not is_admin(call.from_user.id): return
-    from handlers.user import fetch_rates
-    await call.message.edit_text("⏳ Narxlar yuklanmoqda...", parse_mode="HTML")
+    from handlers.user import get_frag_client, PriceCalculator
+    await safe_edit(call.message, "⏳ Narxlar yuklanmoqda...", parse_mode="HTML")
     try:
-        rates, calc = await fetch_rates()
+        client = get_frag_client()
+        pricing_50 = await client.get_stars_pricing(50)
+        packages = await client.get_premium_pricing()
+
         text = (
             f"💱 <b>Joriy narxlar (Fragment-API.uz)</b>\n\n"
-            f"📈 1 TON = <b>${rates.ton_usd:.3f}</b>\n"
-            f"💵 1 USDT = <b>${rates.usdt_usd:.3f}</b>\n\n"
-            f"⭐ <b>Stars (1 dona):</b>\n"
-            f"   Fragment: {rates.stars_ton:.5f} TON\n"
-            f"   Bizning: {calc.stars_price_ton(1):.5f} TON / {calc.stars_price_usdt(1):.4f} USDT\n\n"
-            f"💎 <b>Premium narxlar:</b>\n"
-            f"   3 oy: {calc.premium_price_ton(3):.3f} TON / {calc.premium_price_usdt(3):.2f} USDT\n"
-            f"   6 oy: {calc.premium_price_ton(6):.3f} TON / {calc.premium_price_usdt(6):.2f} USDT\n"
-            f"  12 oy: {calc.premium_price_ton(12):.3f} TON / {calc.premium_price_usdt(12):.2f} USDT\n\n"
-            f"🔧 Ustamalar: Stars ≤1000 +5% | Stars >1000 +8% | Premium 3/6oy +5% | 12oy +3%"
+            f"⭐ <b>Stars (50 dona):</b>\n"
+            f"   Fragment: {pricing_50.price_ton} TON / ${pricing_50.price_usd}\n"
         )
+        ton, usd = PriceCalculator.calc_stars_price(pricing_50)
+        text += f"   Bizning: {ton} TON / ${usd}\n\n"
+        text += f"💎 <b>Premium narxlar:</b>\n"
+        for pkg in packages:
+            p_ton, p_usd = PriceCalculator.calc_premium_price(pkg)
+            text += f"   {pkg.months} oy: {p_ton} TON / ${p_usd}\n"
+        text += f"\n🔧 Ustamalar: Stars ≤1000 +5% | Stars >1000 +8% | Premium 3/6oy +5% | 12oy +3%"
     except Exception as e:
         text = f"❌ Xato: {e}"
 
@@ -66,7 +80,7 @@ async def cb_admin_rates(call: CallbackQuery):
     b.button(text="🔄 Yangilash", callback_data="admin:rates")
     b.button(text="◀️ Back",    callback_data="admin:menu")
     b.adjust(2)
-    await call.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(call.message, text, reply_markup=b.as_markup(), parse_mode="HTML")
 
 
 # ── Stats ──────────────────────────────────────────────────────────────────────
@@ -90,7 +104,7 @@ async def cb_admin_stats(call: CallbackQuery):
     b.button(text="🔄 Yangilash", callback_data="admin:stats")
     b.button(text="◀️ Back", callback_data="admin:menu")
     b.adjust(2)
-    await call.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(call.message, text, reply_markup=b.as_markup(), parse_mode="HTML")
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
@@ -111,7 +125,7 @@ async def cb_admin_users(call: CallbackQuery):
         text += f"{idx}. {lang_flag} {uname} | <code>{u['user_id']}</code> | {date}\n"
     if len(users) > 30:
         text += f"\n... va yana {len(users)-30} ta"
-    await call.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(call.message, text, reply_markup=b.as_markup(), parse_mode="HTML")
 
 
 # ── Orders ─────────────────────────────────────────────────────────────────────
@@ -134,7 +148,7 @@ async def cb_admin_orders(call: CallbackQuery):
     b.button(text="🔍 Filter", callback_data="admin:orders_filter")
     b.button(text="◀️ Back",  callback_data="admin:menu")
     b.adjust(1)
-    await call.message.edit_text(
+    await safe_edit(call.message,
         f"📦 <b>Buyurtmalar [{flt.upper()}] — {len(orders)} ta</b>",
         reply_markup=b.as_markup(), parse_mode="HTML"
     )
@@ -143,7 +157,7 @@ async def cb_admin_orders(call: CallbackQuery):
 @admin_router.callback_query(F.data == "admin:orders_filter")
 async def cb_orders_filter(call: CallbackQuery):
     if not is_admin(call.from_user.id): return
-    await call.message.edit_text("Filter tanlang:", reply_markup=orders_filter_keyboard())
+    await safe_edit(call.message, "Filter tanlang:", reply_markup=orders_filter_keyboard())
 
 
 @admin_router.callback_query(F.data.startswith("admin:order_detail:"))
@@ -168,7 +182,7 @@ async def cb_order_detail(call: CallbackQuery):
         f"🔄 Status: <b>{order['status']}</b>\n"
         f"📅 Sana: {date}"
     )
-    await call.message.edit_text(text, reply_markup=admin_order_keyboard(order_id), parse_mode="HTML")
+    await safe_edit(call.message, text, reply_markup=admin_order_keyboard(order_id), parse_mode="HTML")
 
 
 # ── Confirm / Reject ───────────────────────────────────────────────────────────
@@ -185,16 +199,15 @@ async def cb_admin_order_action(call: CallbackQuery):
         return
 
     if action == "confirm":
-        # Fragment-API.uz orqali haqiqiy xarid
-        await call.message.edit_text(f"⏳ #{order_id} Fragment-API.uz orqali yuborilmoqda...")
+        await safe_edit(call.message, f"⏳ #{order_id} Fragment-API.uz orqali yuborilmoqda...")
         from handlers.user import execute_order_via_api
         success, msg = await execute_order_via_api(call.bot, order_id)
         status_text = f"✅ #{order_id} — {msg}" if success else f"⚠️ #{order_id} — {msg}"
-        await call.message.edit_text(status_text, parse_mode="HTML")
+        await safe_edit(call.message, status_text, parse_mode="HTML")
 
     elif action == "reject":
         await update_order_status(order_id, "rejected")
-        await call.message.edit_text(f"❌ #{order_id} rad etildi.")
+        await safe_edit(call.message, f"❌ #{order_id} rad etildi.")
         try:
             from database import get_user
             user = await get_user(order["user_id"])
@@ -215,7 +228,7 @@ async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.broadcast_message)
     b = InlineKeyboardBuilder()
     b.button(text="❌ Bekor", callback_data="admin:menu")
-    await call.message.edit_text(t("broadcast_prompt", "en"), reply_markup=b.as_markup())
+    await safe_edit(call.message, t("broadcast_prompt", "en"), reply_markup=b.as_markup())
 
 
 @admin_router.message(AdminStates.broadcast_message)
