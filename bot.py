@@ -1,14 +1,16 @@
-"""
-Stars Bot — PostgreSQL + Redis bilan ishlaydi.
-Ishga tushirishdan oldin: docker compose up -d
-"""
 
 import asyncio
 import logging
 import os
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.redis import RedisStorage
-from redis.asyncio import Redis
+from aiogram.fsm.storage.memory import MemoryStorage
+
+try:
+    from aiogram.fsm.storage.redis import RedisStorage
+    from redis.asyncio import Redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 from config import BOT_TOKEN, PAYMENT_TIMEOUT, FRAGMENT_API_KEY_TON
 from handlers import user_router, admin_router
@@ -28,20 +30,22 @@ _bot_instance: Bot = None
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
-# ── Startup diagnostics ───────────────────────────────────────────────────────
+async def get_storage():
+    """Redis ga ulanishga harakat qiladi. Muvaffaqiyatsiz bo'lsa MemoryStorage qaytaradi."""
+    if not REDIS_AVAILABLE:
+        logger.warning("⚠️ Redis kutubxonasi o'rnatilmagan, MemoryStorage ishlatiladi")
+        return MemoryStorage()
 
-async def check_redis() -> Redis:
-    """Redis ulanishini tekshiradi. Ulanmasa xato chiqaradi."""
     try:
         redis = Redis.from_url(REDIS_URL, decode_responses=False)
         await redis.ping()
-        logger.info("✅ Redis ulandi")
-        return redis
+        # Write test — read-only emasligini tekshirish
+        await redis.set("_bot_health_check", "ok", ex=10)
+        logger.info("✅ Redis ulandi (read/write)")
+        return RedisStorage(redis=redis)
     except Exception as e:
-        logger.critical(f"❌ Redis ga ulanib bo'lmadi: {e}")
-        logger.critical(f"   REDIS_URL: {REDIS_URL}")
-        logger.critical("   Redis ishga tushirilganmi? 'docker compose up -d' buyrug'ini ishlating.")
-        raise SystemExit(1)
+        logger.warning(f"⚠️ Redis ishlamayapti ({e}), MemoryStorage ishlatiladi")
+        return MemoryStorage()
 
 
 # ── Background tasks ──────────────────────────────────────────────────────────
@@ -169,9 +173,8 @@ async def main():
     # 1. PostgreSQL
     await init_db()
 
-    # 2. Redis
-    redis = await check_redis()
-    storage = RedisStorage(redis=redis)
+    # 2. Storage (Redis yoki MemoryStorage)
+    storage = await get_storage()
 
     # 3. Bot
     bot = Bot(token=BOT_TOKEN)
